@@ -1,0 +1,85 @@
+package webservice
+
+import (
+	"io/ioutil"
+	"log"
+	"net/http"
+
+	"github.com/go-chi/chi"
+	"github.com/pkg/errors"
+	js "github.com/vrnvu/tiny-to-go/serializer/json"
+	ms "github.com/vrnvu/tiny-to-go/serializer/msgpack"
+	"github.com/vrnvu/tiny-to-go/tiny"
+)
+
+type RedirectHandler interface {
+	Get(http.ResponseWriter, *http.Request)
+	Post(http.ResponseWriter, *http.Request)
+}
+
+type handler struct {
+	redirectService tiny.Service
+}
+
+func NewHandler(redirectService tiny.Service) RedirectHandler {
+	return &handler{redirectService: redirectService}
+}
+
+func setupResponse(w http.ResponseWriter, contentType string, body []byte, statusCode int) {
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(statusCode)
+	_, err := w.Write(body)
+	if err != nil {
+		log.Println(err)
+	}
+}
+
+func (h *handler) serializer(contentType string) tiny.Serializer {
+	if contentType == "application/x-msgpack" {
+		return &ms.Redirect{}
+	}
+	return &js.Redirect{}
+}
+
+func (h *handler) Get(w http.ResponseWriter, r *http.Request) {
+	code := chi.URLParam(r, "code")
+	redirect, err := h.redirectService.Find(code)
+	if err != nil {
+		if errors.Cause(err) == tiny.ErrRedirectNotFound {
+			http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+			return
+		}
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, redirect.URL, http.StatusMovedPermanently)
+}
+
+func (h *handler) Post(w http.ResponseWriter, r *http.Request) {
+	contentType := r.Header.Get("Content-Type")
+	requestBody, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	redirect, err := h.serializer(contentType).Decode(requestBody)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	err = h.redirectService.Save(redirect)
+	if err != nil {
+		if errors.Cause(err) == tiny.ErrRedirectInvalid {
+			http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+			return
+		}
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	responseBody, err := h.serializer(contentType).Encode(redirect)
+	if err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	setupResponse(w, contentType, responseBody, http.StatusCreated)
+}
